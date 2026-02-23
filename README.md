@@ -1,6 +1,6 @@
 # Reddit Advertisement Sentiment Analysis
 
-## Executive Summary (For Hiring Managers)
+## Executive Summary
 
 In this experiment, I tested whether AI-written ads outperform human-written ads in driving engagement. AI-generated neutral ads achieved a 34% lift in CTR and recruited users who were significantly more likely to complete the survey. However, performance varied by tone, demonstrating the importance of message positioning in paid media strategy.
 
