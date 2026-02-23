@@ -1,0 +1,132 @@
+---
+title: "Power Analysis for 'AI vs Human Copy in Survey Recruitment'"
+author: "Agostina Galluzzo · Armaan Hiranandani · Hyeong Geon Kim · Kevin Coppa, Mike Mandujano"
+date: "`r format(Sys.Date(), '%B %d, %Y')`"
+output:
+  html_document:
+    toc: false
+    number_sections: false
+    df_print: tibble
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+library(tidyverse)
+library(sandwich)
+library(lmtest)
+library(pbapply) # for progress bar
+library(furrr) # For multicore
+```
+
+### Background & Assumptions
+
+Our field experiment tests whether large-language-model (LLM) ad copy out-performs human-written copy in recruiting survey respondents on Reddit.
+
+The key metric is **click-through rate (CTR)**. Industry evidence suggests AI copy yields uplifts from 25 % to 100 %+.
+
+| Scenario         | Baseline CTR | Uplift | Treatment CTR |
+|------------------|--------------|--------|---------------|
+| A (Conservative) | 1%           | +25%   | 1.25%         |
+| B (Typical)      | 1%           | +40%   | 1.40%         |
+| C (Optimistic)   | 1%           | +100%  | 2.00%         |
+
+Impressions are randomly assigned **1:1** to Control vs. Treatment.
+
+Analytic approach in the real study: **logistic regression with robust (HC3) standard errors**:
+
+> `logit Pr(click = 1) = β₀ + β₁ × Treatment`
+
+We reject H₀: β₁ = 0 at α = 0.05 (two-tailed).
+
+------------------------------------------------------------------------
+
+### Simulation Function
+
+```{r simulation function, include=TRUE}
+simulate_power <- function(n_per_arm,
+                           p_control,
+                           p_treat,
+                           sims = 500, # Real World - 500 simulations per iteration
+                           # sims = 50, # For testing - 50 simulations per iteration
+                           alpha = 0.05) {
+  reject <- pbreplicate(sims, {
+    clicks <- c(rbinom(n_per_arm, 1, p_control),
+                rbinom(n_per_arm, 1, p_treat))
+    treat  <- rep(0:1, each = n_per_arm)
+
+    fit <- glm(clicks ~ treat, family = binomial)
+    rob_vcov <- sandwich::vcovHC(fit, type = "HC3")
+    p_val <- lmtest::coeftest(fit, rob_vcov)[2, 4]
+
+    p_val < alpha
+  })
+
+  mean(reject)
+}
+```
+
+------------------------------------------------------------------------
+
+### Power Curve Simulation
+
+```{r power curve simulation, seed=TRUE, include=TRUE}
+grid <- expand.grid(
+  n  = seq(500, 50000, by = 500), # Real World - 300 iterations (takes a long time)
+  # n  = seq(1000, 20000, by = 2000), # Testing - 10 iterations
+  sc = factor(c("A", "B", "C"))
+)
+
+grid$p0 <- 0.01
+grid$p1 <- ifelse(grid$sc == "A", 0.0125,
+           ifelse(grid$sc == "B", 0.0140, 0.02))
+
+set.seed(2025)
+# grid$power <- purrr::pmap_dbl(list(grid$n, grid$p0, grid$p1), # For single-core processing
+#                                ~ simulate_power(..1, ..2, ..3)) # For single-core processing
+
+plan(multisession, workers = parallel::detectCores() - 4) # For multi-core processing
+grid$power <- future_pmap_dbl(list(grid$n, grid$p0, grid$p1), # For multi-core processing
+                              ~ simulate_power(..1, ..2, ..3)) # For multi-core processing
+
+```
+
+------------------------------------------------------------------------
+
+### Power Curve Plot
+
+```{r power curve plot, echo=TRUE}
+ggplot(grid, aes(x = n, y = power, colour = sc)) +
+  geom_line(linewidth = 1) +
+  geom_hline(yintercept = 0.8, linetype = "dashed") +
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1)) +
+  scale_x_continuous(breaks = scales::pretty_breaks()) +
+  labs(colour = "Scenario",
+       x = "Impressions per arm",
+       y = "Achieved power",
+       title = "Simulated Power to Detect LLM Copy Uplift on CTR") +
+  theme_minimal(base_size = 12)
+```
+
+------------------------------------------------------------------------
+
+### Sample Size Table for 80% Power
+
+```{r sample size 80% power, echo=TRUE}
+power_table <- grid %>%
+  group_by(sc) %>%
+  filter(power >= 0.8) %>%
+  summarise(min_n_for_80_power = min(n))
+
+a_val <- power_table$min_n_for_80_power[power_table$sc == "A"]
+b_val <- power_table$min_n_for_80_power[power_table$sc == "B"]
+c_val <- power_table$min_n_for_80_power[power_table$sc == "C"]
+
+
+knitr::kable(power_table, caption = "Minimum Sample Size Required per Arm for 80% Power")
+```
+
+Below is the minimum number of impressions per arm required to achieve 80% statistical power under each scenario:
+
+-   Scenario A (25% uplift): You need at least `r format(a_val, big.mark = ",")` impressions per arm to detect an increase from 1% to 1.25% CTR.
+-   Scenario B (40% uplift): You need at least `r format(b_val, big.mark = ",")` impressions per arm to detect an increase from 1% to 1.4% CTR.
+-   Scenario C (100% uplift): You need at least `r format(c_val, big.mark = ",")` impressions per arm to detect an increase from 1% to 2% CTR.
